@@ -9,3 +9,5 @@ email-validator
 pinecone
 openai 
 python-dotenv
+langgraph
+langchain-openai

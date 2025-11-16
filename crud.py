@@ -1,193 +1,223 @@
 import os
-import uuid
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI
 from pydantic import BaseModel
-from pymongo import MongoClient
-from dotenv import load_dotenv
-from typing import Optional
+from typing import Dict, Any
 from openai import OpenAI
-
+from pymongo import MongoClient
+from langgraph.graph import StateGraph, END
+from dotenv import load_dotenv
+from pinecone import Pinecone
+# =====================================================
+# ENV + CLIENTS
+# =====================================================
 load_dotenv()
+API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=API_KEY)
 
-# ============================
-# ENV + DB SETUP
-# ============================
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+mongo = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+db = mongo["BussTicketBD"]
+collection = db["busses"]
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+INDEX_NAME = os.getenv("PINECONE_INDEX")
+app = FastAPI()
 
-client = MongoClient(MONGO_URI)
-db = client["BussTicketBD"]
+pc = Pinecone(api_key=PINECONE_API_KEY)
+index = pc.Index(INDEX_NAME)
 
-busses_col = db["busses"]
-bookings_col = db["bookings"]
+app = FastAPI()
 
-ai = OpenAI(api_key=OPENAI_API_KEY)
-
-app = FastAPI(title="Bus Booking ChatBot API")
-
-
-# ============================
-# MODELS
-# ============================
 class ChatRequest(BaseModel):
-    message: str
-    phone: Optional[str] = None
+    query: str
+
+def embed(text: str):
+    res = client.embeddings.create(
+        model="text-embedding-3-large",
+        input=text
+    )
+    return res.data[0].embedding
+# =====================================================
+# GRAPH STATE
+# =====================================================
+class ChatState(BaseModel):
+    user_message: str
+    intent: str = None
+    result: Any = None
 
 
-# ============================
-# Helper – Load provider file
-# ============================
-def load_provider_file(provider_name: str):
-    file_path = f"providers/{provider_name}.txt"
-    if not os.path.exists(file_path):
-        return None
-    with open(file_path, "r") as f:
-        return f.read()
+# =====================================================
+# INTENT DETECTOR
+# =====================================================
+def detect_intent(state: ChatState):
+    prompt = f"""
+    You MUST classify the message into EXACTLY one of these:
+    - search_buses
+    - provider_info
+    - book_ticket
+    - view_ticket
+    - cancel_ticket
+
+    Message: {state.user_message}
+
+    Respond ONLY with the intent.
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    state.intent = resp.choices[0].message.content.strip()
+    return state
 
 
-# ============================
-# Core Logic — Process Query
-# ============================
-def process_user_intent(user_message: str, phone: Optional[str]):
-    bus_data = busses_col.find_one({})
-    districts = bus_data["districts"]
-    providers = bus_data["bus_providers"]
+# =====================================================
+# FUNCTIONS USING MONGODB
+# =====================================================
 
-    msg = user_message.lower()
+# 1. Search for buses between districts
+def search_buses(state: ChatState):
+    msg = state.user_message
 
-    # ---------------------------------------------------------
-    # INTENT 1 — Search Bus (price, from → to)
-    # ---------------------------------------------------------
-    if "bus" in msg and ("from" in msg and "to" in msg):
-        # naive extraction
-        words = msg.split()
-        if "from" in words and "to" in words:
-            from_idx = words.index("from") + 1
-            to_idx = words.index("to") + 1
-            from_dist = words[from_idx].capitalize()
-            to_dist = words[to_idx].capitalize()
-        else:
-            raise HTTPException(400, "Could not extract districts")
+    dataset = collection.find_one({}, {"districts": 1, "bus_providers": 1})
 
-        # price extraction
-        max_price = None
-        for w in words:
-            if w.isdigit():
-                max_price = int(w)
+    prompt = f"""
+    You are a bus route search assistant.
 
-        # find provider
-        to_d = next((d for d in districts if d["name"] == to_dist), None)
-        if not to_d:
-            return {"reply": f"No data for district {to_dist}"}
+    User message:
+    {msg}
 
-        # filter price
-        droppings = (
-            [p for p in to_d["dropping_points"] if max_price is None or p["price"] <= max_price]
+    Data:
+    Districts with dropping points:
+    {dataset["districts"]}
+
+    Bus Providers:
+    {dataset["bus_providers"]}
+
+    Task:
+    - Understand what route the user is asking about.
+    - Check which bus providers cover BOTH the from and to districts.
+    - If no providers match, say that no buses are available.
+    - Respond with a SHORT natural-language answer, NOT JSON.
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    state.result = resp.choices[0].message.content.strip()
+    return state
+
+
+# 2. Get bus provider information
+def provider_info(state: ChatState):
+    query = state.user_message
+
+    try:
+        # Embed the query
+        vector = embed(query)
+
+        # Search Pinecone index
+        results = index.query(vector=vector, top_k=5, include_metadata=True)
+
+        if not results["matches"]:
+            state.result = "No relevant information found for this provider."
+            return state
+
+        # Build context for LLM
+        text_blocks = [match["metadata"].get("text", "") for match in results["matches"]]
+        context_str = "\n\n".join(text_blocks)
+        prompt = f"""
+Use the following context to answer the user query.
+
+Context:
+{context_str}
+
+User Query:
+{query}
+
+Answer:
+"""
+
+        # Call OpenAI ChatCompletion
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Answer based only on the provided context."},
+                {"role": "user", "content": prompt}
+            ]
         )
 
-        bus_list = [
-            p["name"] for p in providers
-            if from_dist in p["coverage_districts"] and to_dist in p["coverage_districts"]
-        ]
+        state.result = completion.choices[0].message.content
+        return state
 
-        return {
-            "reply": f"Buses from {from_dist} to {to_dist}: {bus_list}. Dropping points: {droppings}"
-        }
-
-    # ---------------------------------------------------------
-    # INTENT 2 — Provider Info
-    # ---------------------------------------------------------
-    for p in providers:
-        if p["name"].lower() in msg and ("contact" in msg or "details" in msg or "info" in msg):
-            file_data = load_provider_file(p["name"])
-            return {
-                "reply": f"Provider: {p['name']}\nCoverage: {p['coverage_districts']}\n\nDetails:\n{file_data}"
-            }
-
-    # ---------------------------------------------------------
-    # INTENT 3 — Booking
-    # ---------------------------------------------------------
-    if "book" in msg:
-        # extremely simple extraction
-        words = msg.split()
-
-        # find districts
-        from_dist = None
-        to_dist = None
-        for d in districts:
-            if d["name"].lower() in msg:
-                if "from" in msg and d["name"].lower() in msg[msg.index("from"):]:
-                    from_dist = d["name"]
-                elif "to" in msg and d["name"].lower() in msg[msg.index("to"):]:
-                    to_dist = d["name"]
-
-        # find provider
-        provider = None
-        for p in providers:
-            if p["name"].lower() in msg:
-                provider = p["name"]
-
-        if not phone:
-            return {"reply": "Phone number required to book. Add phone in request body."}
-
-        booking_id = str(uuid.uuid4())
-        record = {
-            "booking_id": booking_id,
-            "phone": phone,
-            "from": from_dist,
-            "to": to_dist,
-            "provider": provider,
-            "raw_message": user_message
-        }
-        bookings_col.insert_one(record)
-
-        return {"reply": f"Booking confirmed. ID: {booking_id}"}
-
-    # ---------------------------------------------------------
-    # INTENT 4 — Cancel Booking
-    # ---------------------------------------------------------
-    if "cancel" in msg:
-        words = msg.split()
-        # naive find id
-        for w in words:
-            if len(w) > 25:  # uuid length
-                booking_id = w
-                result = bookings_col.delete_one({"booking_id": booking_id})
-                if result.deleted_count == 0:
-                    return {"reply": "No booking found with this ID"}
-                else:
-                    return {"reply": "Your booking has been cancelled"}
-
-        return {"reply": "Booking ID missing. Please specify."}
-
-    # ---------------------------------------------------------
-    # INTENT 5 — View Bookings
-    # ---------------------------------------------------------
-    if "my booking" in msg or "my bookings" in msg or "show booking" in msg:
-        if not phone:
-            return {"reply": "Provide phone number to view bookings."}
-
-        user_bookings = list(bookings_col.find({"phone": phone}, {"_id": 0}))
-        return {"reply": user_bookings}
-
-    # ---------------------------------------------------------
-    # FALLBACK
-    # ---------------------------------------------------------
-    return {"reply": "I did not understand the request."}
+    except Exception as e:
+        state.result = f"Error: {str(e)}"
+        return state
 
 
-# ============================
-# Chat Endpoint
-# ============================
+
+# 3. Book ticket (placeholder)
+def book_ticket(state: ChatState):
+    # A real system would create a booking entry
+    state.result = "Ticket booked (placeholder)."
+    return state
+
+
+# 4. View user ticket (placeholder)
+def view_ticket(state: ChatState):
+    state.result = "User ticket info (placeholder)."
+    return state
+
+
+# 5. Cancel ticket (placeholder)
+def cancel_ticket(state: ChatState):
+    state.result = "Ticket cancelled (placeholder)."
+    return state
+
+
+# =====================================================
+# BUILD LANGGRAPH
+# =====================================================
+graph = StateGraph(ChatState)
+
+graph.add_node("detect_intent", detect_intent)
+graph.add_node("search_buses", search_buses)
+graph.add_node("provider_info", provider_info)
+graph.add_node("book_ticket", book_ticket)
+graph.add_node("view_ticket", view_ticket)
+graph.add_node("cancel_ticket", cancel_ticket)
+
+graph.set_entry_point("detect_intent")
+
+graph.add_conditional_edges(
+    "detect_intent",
+    lambda state: state.intent,
+    {
+        "search_buses": "search_buses",
+        "provider_info": "provider_info",
+        "book_ticket": "book_ticket",
+        "view_ticket": "view_ticket",
+        "cancel_ticket": "cancel_ticket",
+    }
+)
+
+for f in ["search_buses","provider_info","book_ticket","view_ticket","cancel_ticket"]:
+    graph.add_edge(f, END)
+
+flow = graph.compile()
+
+
+# =====================================================
+# FASTAPI ENDPOINT
+# =====================================================
+class ChatInput(BaseModel):
+    message: str
+
+
 @app.post("/chat")
-def chat(req: ChatRequest):
-    result = process_user_intent(req.message, req.phone)
-    return result
+async def chat_endpoint(data: ChatInput):
+    state = {"user_message": data.message}
+    out = flow.invoke(state)
+    return out["result"]
 
-
-# ============================
-# Root
-# ============================
-@app.get("/")
-def root():
-    return {"message": "Chatbot Running", "endpoint": "/chat"}
