@@ -6,3 +6,6 @@ bcrypt
 python-jose[cryptography]
 pydantic
 email-validator
+pinecone
+openai 
+python-dotenv
