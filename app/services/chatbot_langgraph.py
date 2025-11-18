@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Any, Optional
 from openai import OpenAI
@@ -10,9 +10,9 @@ from pinecone import Pinecone
 import uuid
 from datetime import datetime
 
-# =====================================================
-# ENV + CLIENTS
-# =====================================================
+
+
+
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=API_KEY)
@@ -93,12 +93,69 @@ def detect_intent(state: ChatState):
 # INTENT HANDLERS
 # =====================================================
 def ask_for_info(state: ChatState):
-    state.result = "ask for info."
+    msg = state.user_message
+    dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
+
+    prompt = f"""
+    You are a bus route search assistant.
+
+    User message:
+    {msg}
+
+    Data:
+    Districts with dropping points:
+    {dataset['districts']}
+
+    Bus Providers:
+    {dataset['bus_providers']}
+
+    Task:
+    - Respond with a SHORT natural-language answer, NOT JSON.
+    """
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    state.result = resp.choices[0].message.content.strip()
     return state
 
 def provider_info(state: ChatState):
-    state.result = "Provider information (placeholder)."
-    return state
+    query = state.user_message
+    try:
+        vector = embed(query)
+        results = index.query(vector=vector, top_k=5, include_metadata=True)
+
+        if not results["matches"]:
+            state.result = "No relevant information found for this provider."
+            return state
+
+        text_blocks = [match["metadata"].get("text", "") for match in results["matches"]]
+        context_str = "\n\n".join(text_blocks)
+
+        prompt = f"""
+Use the following context to answer the user query.
+
+Context:
+{context_str}
+
+User Query:
+{query}
+
+Answer:
+"""
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Answer based only on the provided context."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        state.result = completion.choices[0].message.content
+        return state
+
+    except Exception as e:
+        state.result = f"Error: {str(e)}"
+        return state
 
 def book_ticket(state: ChatState):
     state.result = "Ticket booked (placeholder)."
@@ -161,18 +218,3 @@ def store_message(thread_id: str, user_message: str, bot_response: str):
         {"thread_id": thread_id},
         {"$push": {"chat": {"user": user_message, "bot": bot_response, "timestamp": datetime.utcnow()}}}
     )
-
-# =====================================================
-# CHAT ENDPOINT
-# =====================================================
-@app.post("/chat")
-async def chat_endpoint(data: ChatInput):
-    # Ensure thread exists
-    thread_id = create_or_get_thread(data.user_id, data.thread_id)
-    state = {"user_message": data.message}
-    out = flow.invoke(state)
-
-    # Save chat to MongoDB
-    store_message(thread_id, data.message, out["result"])
-
-    return {"thread_id": thread_id, "response": out["result"]}

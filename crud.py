@@ -226,7 +226,6 @@ def store_message(thread_id: str, user_message: str, bot_response: str):
 async def chat_endpoint(data: ChatInput):
     # Ensure thread exists
     thread_id = create_or_get_thread(data.user_id, data.thread_id)
-
     state = {"user_message": data.message}
     out = flow.invoke(state)
 
