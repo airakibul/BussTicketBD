@@ -59,9 +59,20 @@ class ChatState(BaseModel):
 # INTENT DETECTION
 # =====================================================
 def detect_intent(state: ChatState):
+    dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
+
     prompt = f"""
+    
+    Data:
+    Districts with dropping points:
+    {dataset['districts']}
+
+    Bus Providers:
+    {dataset['bus_providers']}
+    
+    Task:
     You MUST classify the message into EXACTLY one of these:
-    - search_buses
+    - ask_for_info
     - provider_info
     - book_ticket
     - view_ticket
@@ -81,7 +92,7 @@ def detect_intent(state: ChatState):
 # =====================================================
 # INTENT HANDLERS
 # =====================================================
-def search_buses(state: ChatState):
+def ask_for_info(state: ChatState):
     msg = state.user_message
     dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
 
@@ -99,9 +110,6 @@ def search_buses(state: ChatState):
     {dataset['bus_providers']}
 
     Task:
-    - Understand what route the user is asking about.
-    - Check which bus providers cover BOTH the from and to districts.
-    - If no providers match, say that no buses are available.
     - Respond with a SHORT natural-language answer, NOT JSON.
     """
     resp = client.chat.completions.create(
@@ -166,7 +174,7 @@ def cancel_ticket(state: ChatState):
 # =====================================================
 graph = StateGraph(ChatState)
 graph.add_node("detect_intent", detect_intent)
-graph.add_node("search_buses", search_buses)
+graph.add_node("ask_for_info", ask_for_info)
 graph.add_node("provider_info", provider_info)
 graph.add_node("book_ticket", book_ticket)
 graph.add_node("view_ticket", view_ticket)
@@ -176,14 +184,14 @@ graph.add_conditional_edges(
     "detect_intent",
     lambda state: state.intent,
     {
-        "search_buses": "search_buses",
+        "ask_for_info": "ask_for_info",
         "provider_info": "provider_info",
         "book_ticket": "book_ticket",
         "view_ticket": "view_ticket",
         "cancel_ticket": "cancel_ticket",
     }
 )
-for f in ["search_buses", "provider_info", "book_ticket", "view_ticket", "cancel_ticket"]:
+for f in ["ask_for_info", "provider_info", "book_ticket", "view_ticket", "cancel_ticket"]:
     graph.add_edge(f, END)
 flow = graph.compile()
 
