@@ -1,178 +1,158 @@
 import os
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Any, Optional
-from openai import OpenAI
-from pymongo import MongoClient
-from langgraph.graph import StateGraph, END
-from dotenv import load_dotenv
-from pinecone import Pinecone
 import uuid
 from datetime import datetime
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from pymongo import MongoClient
+from dotenv import load_dotenv
+from openai import OpenAI
+from langgraph.graph import StateGraph, END
+from pinecone import Pinecone
 
-# =====================================================
+# =======================
 # ENV + CLIENTS
-# =====================================================
+# =======================
 load_dotenv()
 API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=API_KEY)
 
 mongo = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
 db = mongo["BussTicketBD"]
-bus_collection = db["busses"]
 chat_collection = db["chat_memory"]
+bus_collection = db["busses"]
+tickets_collection = db["tickets"]
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 INDEX_NAME = os.getenv("PINECONE_INDEX")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(INDEX_NAME)
 
+# =======================
+# FASTAPI APP
+# =======================
 app = FastAPI()
 
-# =====================================================
-# SCHEMAS
-# =====================================================
-class ChatInput(BaseModel):
+# =======================
+# Pydantic Models
+# =======================
+class ChatRequest(BaseModel):
+    user_id: str
     message: str
-    user_id: str  # to associate chat with a user
-    thread_id: Optional[str] = None  # optional, can create new thread
+    thread_id: Optional[str] = None
 
-# =====================================================
-# EMBEDDING FUNCTION
-# =====================================================
-def embed(text: str):
-    res = client.embeddings.create(
-        model="text-embedding-3-large",
-        input=text
-    )
-    return res.data[0].embedding
-
-# =====================================================
-# CHAT STATE
-# =====================================================
-class ChatState(BaseModel):
+class ChatStateSchema(BaseModel):
+    user_id: str
     user_message: str
-    intent: Optional[str] = None
-    result: Any = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    date: Optional[str] = None
+    seat: Optional[int] = None
 
-# =====================================================
-# INTENT DETECTION
-# =====================================================
-def detect_intent(state: ChatState):
-    dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
+# =======================
+# UTILITY FUNCTIONS
+# =======================
+def get_bus_data():
+    return bus_collection.find_one({}, {"_id": 0, "districts": 1, "bus_providers": 1})
+
+def get_user_chat_history(user_id: str, thread_id: Optional[str] = None):
+    query = {"user_id": user_id}
+    if thread_id:
+        query["thread_id"] = thread_id
+    doc = chat_collection.find_one(query)
+    if doc:
+        return doc.get("chat", [])
+    return []
+
+def save_chat(user_id: str, message: str, response: str, thread_id: Optional[str] = None):
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
+
+    chat_collection.update_one(
+        {"user_id": user_id, "thread_id": thread_id},
+        {"$push": {
+            "chat": {
+                "user": message,
+                "bot": response,
+                "timestamp": datetime.utcnow()
+            }
+        },
+         "$setOnInsert": {"created_at": datetime.utcnow()}},
+        upsert=True
+    )
+    return thread_id
+
+# =======================
+# STATE FUNCTIONS
+# =======================
+def book_ticket_state(state, thread_id: Optional[str] = None):
+    msg = state.user_message
+    chat_history = get_user_chat_history(state.user_id, thread_id)
+    bus_data = get_bus_data()
 
     prompt = f"""
-    
-    Data:
-    Districts with dropping points:
-    {dataset['districts']}
+    You are a bus booking assistant.
 
-    Bus Providers:
-    {dataset['bus_providers']}
-    
-    Task:
-    You MUST classify the message into EXACTLY one of these:
-    - ask_for_info
-    - provider_info
-    - book_ticket
-    - view_ticket
-    - cancel_ticket
+    User message: {msg}
+    Previous conversation: {chat_history}
+    Bus data: {bus_data}
 
-    Message: {state.user_message}
-
-    Respond ONLY with the intent.
+    TASK:
+    1. Identify missing info: origin, destination, date, seat.
+    2. Ask user for missing info if not provided.
+    3. If all info is present, respond with JSON: {{ "booking_confirmed": true, "details": ... }}
+    4. Otherwise, ask only for missing fields.
     """
+
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
     )
-    state.intent = resp.choices[0].message.content.strip()
-    return state
+    response_text = resp.choices[0].message.content
 
-# =====================================================
-# INTENT HANDLERS
-# =====================================================
-def ask_for_info(state: ChatState):
-    state.result = "ask for info."
-    return state
+    # Save ticket if confirmed
+    if "booking_confirmed" in response_text.lower():
+        tickets_collection.insert_one({
+            "ticket_id": str(uuid.uuid4()),
+            "user_id": state.user_id,
+            "details": response_text,
+            "timestamp": datetime.utcnow()
+        })
 
-def provider_info(state: ChatState):
-    state.result = "Provider information (placeholder)."
-    return state
+    save_chat(state.user_id, msg, response_text, thread_id)
+    return response_text
 
-def book_ticket(state: ChatState):
-    state.result = "Ticket booked (placeholder)."
-    return state
-
-def view_ticket(state: ChatState):
-    state.result = "User ticket info (placeholder)."
-    return state
-
-def cancel_ticket(state: ChatState):
-    state.result = "Ticket cancelled (placeholder)."
-    return state
-
-# =====================================================
-# LANGGRAPH SETUP
-# =====================================================
-graph = StateGraph(ChatState)
-graph.add_node("detect_intent", detect_intent)
-graph.add_node("ask_for_info", ask_for_info)
-graph.add_node("provider_info", provider_info)
-graph.add_node("book_ticket", book_ticket)
-graph.add_node("view_ticket", view_ticket)
-graph.add_node("cancel_ticket", cancel_ticket)
-graph.set_entry_point("detect_intent")
-graph.add_conditional_edges(
-    "detect_intent",
-    lambda state: state.intent,
-    {
-        "ask_for_info": "ask_for_info",
-        "provider_info": "provider_info",
-        "book_ticket": "book_ticket",
-        "view_ticket": "view_ticket",
-        "cancel_ticket": "cancel_ticket",
-    }
+# =======================
+# LANGGRAPH STATE SCHEMA
+# =======================
+states = {"book_ticket": book_ticket_state}
+graph = StateGraph(
+    state_schema=ChatStateSchema,
+    states=states,
+    start_state="book_ticket",
+    end_state=END
 )
-for f in ["ask_for_info", "provider_info", "book_ticket", "view_ticket", "cancel_ticket"]:
-    graph.add_edge(f, END)
-flow = graph.compile()
 
-# =====================================================
-# CHAT MEMORY HELPERS
-# =====================================================
-def create_or_get_thread(user_id: str, thread_id: Optional[str] = None):
-    if thread_id:
-        thread = chat_collection.find_one({"thread_id": thread_id})
-        if thread:
-            return thread_id
-    # Create new thread
-    new_thread_id = str(uuid.uuid4())
-    chat_collection.insert_one({
-        "thread_id": new_thread_id,
-        "user_id": user_id,
-        "chat": [],
-        "created_at": datetime.utcnow()
-    })
-    return new_thread_id
-
-def store_message(thread_id: str, user_message: str, bot_response: str):
-    chat_collection.update_one(
-        {"thread_id": thread_id},
-        {"$push": {"chat": {"user": user_message, "bot": bot_response, "timestamp": datetime.utcnow()}}}
-    )
-
-# =====================================================
-# CHAT ENDPOINT
-# =====================================================
+# =======================
+# FASTAPI ENDPOINT
+# =======================
 @app.post("/chat")
-async def chat_endpoint(data: ChatInput):
-    # Ensure thread exists
-    thread_id = create_or_get_thread(data.user_id, data.thread_id)
-    state = {"user_message": data.message}
-    out = flow.invoke(state)
+async def chat(request: ChatRequest):
+    try:
+        class ChatState:
+            def __init__(self, user_id, user_message):
+                self.user_id = user_id
+                self.user_message = user_message
+                self.origin = None
+                self.destination = None
+                self.date = None
+                self.seat = None
 
-    # Save chat to MongoDB
-    store_message(thread_id, data.message, out["result"])
+        state = ChatState(request.user_id, request.message)
+        response = book_ticket_state(state, thread_id=request.thread_id)
 
-    return {"thread_id": thread_id, "response": out["result"]}
+        return {"response": response, "thread_id": request.thread_id or str(uuid.uuid4())}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

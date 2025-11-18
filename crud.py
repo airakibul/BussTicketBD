@@ -59,18 +59,8 @@ class ChatState(BaseModel):
 # INTENT DETECTION
 # =====================================================
 def detect_intent(state: ChatState):
-    dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
 
     prompt = f"""
-    
-    Data:
-    Districts with dropping points:
-    {dataset['districts']}
-
-    Bus Providers:
-    {dataset['bus_providers']}
-    
-    Task:
     You MUST classify the message into EXACTLY one of these:
     - ask_for_info
     - provider_info
@@ -123,8 +113,8 @@ def provider_info(state: ChatState):
     query = state.user_message
     try:
         vector = embed(query)
-        results = index.query(vector=vector, top_k=5, include_metadata=True)
-
+        results = index.query(vector=vector, top_k=1, include_metadata=True)
+        print ("Pinecone query results:", results)
         if not results["matches"]:
             state.result = "No relevant information found for this provider."
             return state
@@ -156,7 +146,7 @@ Answer:
     except Exception as e:
         state.result = f"Error: {str(e)}"
         return state
-
+    
 def book_ticket(state: ChatState):
     state.result = "Ticket booked (placeholder)."
     return state
