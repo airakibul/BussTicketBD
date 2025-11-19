@@ -54,24 +54,39 @@ class ChatState(BaseModel):
     user_message: str
     intent: Optional[str] = None
     result: Any = None
+    thread_id: Optional[str] = None  # optional, can create new thread
 
 # =====================================================
 # INTENT DETECTION
 # =====================================================
 def detect_intent(state: ChatState):
+    chat = chat_collection.find_one({"thread_id": state.thread_id}, {"chat": {"$slice": -10}})
 
     prompt = f"""
-    You MUST classify the message into EXACTLY one of these:
-    - ask_for_info
-    - provider_info
-    - book_ticket
-    - view_ticket
-    - cancel_ticket
+You are a bus ticket booking assistant.
 
-    Message: {state.user_message}
+You are given the user's last 10 messages and the assistant's replies:
+CHAT_HISTORY:
+{chat}
 
-    Respond ONLY with the intent.
-    """
+Your job:
+1. Read the full chat history and identify what the user is currently trying to do.
+2. Use the latest user message to determine the intent in context.
+
+INTENT RULES (choose EXACTLY ONE):
+- ask_for_info       → user asks about routes, dropping points, fare, timing, seat availability
+- provider_info      → user asks about bus company details
+- book_ticket        → user is trying to book/confirm a ticket
+- view_ticket        → user wants to see previously booked tickets
+- cancel_ticket      → user wants to cancel a ticket
+
+LATEST USER MESSAGE:
+{state.user_message}
+
+Output:
+Return ONLY the intent name, nothing else.
+"""
+
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}]
@@ -85,12 +100,15 @@ def detect_intent(state: ChatState):
 def ask_for_info(state: ChatState):
     msg = state.user_message
     dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
-
+    chat = chat_collection.find_one({"thread_id": state.thread_id}, {"chat": {"$slice": -10}})
     prompt = f"""
     You are a bus route search assistant.
 
     User message:
     {msg}
+    
+    CHAT HISTORY:
+    {chat}
 
     Data:
     Districts with dropping points:
@@ -100,6 +118,8 @@ def ask_for_info(state: ChatState):
     {dataset['bus_providers']}
 
     Task:
+    - Use the chat history to understand context.
+    - Provide accurate info about routes, dropping points, fares, timings, seat availability.
     - Respond with a SHORT natural-language answer, NOT JSON.
     """
     resp = client.chat.completions.create(
@@ -114,7 +134,6 @@ def provider_info(state: ChatState):
     try:
         vector = embed(query)
         results = index.query(vector=vector, top_k=1, include_metadata=True)
-        print ("Pinecone query results:", results)
         if not results["matches"]:
             state.result = "No relevant information found for this provider."
             return state
@@ -216,7 +235,11 @@ def store_message(thread_id: str, user_message: str, bot_response: str):
 async def chat_endpoint(data: ChatInput):
     # Ensure thread exists
     thread_id = create_or_get_thread(data.user_id, data.thread_id)
-    state = {"user_message": data.message}
+    state = {
+    "user_message": data.message,
+    "thread_id": thread_id
+    }
+
     out = flow.invoke(state)
 
     # Save chat to MongoDB
