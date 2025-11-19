@@ -374,12 +374,369 @@ Is this information correct? Type 'yes' to confirm or provide corrections.
         return state
 
 def view_ticket(state: ChatState):
-    state.result = "User ticket info (placeholder)."
-    return state
+    """
+    View user's booked tickets by phone number
+    """
+    thread_id = state.thread_id
+    user_message = state.user_message
+    
+    # Fetch chat history
+    chat_doc = chat_collection.find_one(
+        {"thread_id": thread_id},
+        {"chat": 1, "view_ticket_phone": 1}
+    )
+    
+    if not chat_doc:
+        state.result = "Sorry, I couldn't find your conversation history."
+        return state
+    
+    chat_history = chat_doc.get("chat", [])
+    stored_phone = chat_doc.get("view_ticket_phone")
+    
+    # Format chat history for LLM
+    formatted_history = "\n".join([
+        f"User: {msg.get('user', '')}\nBot: {msg.get('bot', '')}"
+        for msg in chat_history[-10:]
+    ])
+    
+    # Extract phone number using LLM
+    extraction_prompt = f"""
+You are a ticket viewing assistant. Extract the phone number from the conversation.
+
+CHAT HISTORY:
+{formatted_history}
+
+CURRENT USER MESSAGE:
+{user_message}
+
+STORED PHONE (if any):
+{stored_phone}
+
+Extract the phone number that the user wants to check tickets for.
+Return ONLY the phone number, nothing else. If no phone number is found, return "NOT_FOUND".
+
+Examples:
+- "show my tickets" → extract from chat history or stored phone
+- "my number is +8801712345678" → +8801712345678
+- "01712345678" → 01712345678
+- "check tickets for 01812345678" → 01812345678
+"""
+    
+    try:
+        extraction_response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": extraction_prompt}],
+            temperature=0
+        )
+        
+        phone = extraction_response.choices[0].message.content.strip()
+        
+        if phone == "NOT_FOUND" or not phone:
+            state.result = """
+I need your phone number to retrieve your tickets.
+
+Please provide the phone number you used when booking.
+Example: 01712345678 or +8801712345678
+"""
+            return state
+        
+        # Store phone for future reference
+        chat_collection.update_one(
+            {"thread_id": thread_id},
+            {"$set": {"view_ticket_phone": phone}}
+        )
+        
+        # Search for bookings with this phone number
+        bookings = list(db["bookings"].find(
+            {"phone": {"$regex": phone.replace("+", "\\+"), "$options": "i"}},
+            {"_id": 0}
+        ).sort("booked_at", -1))
+        
+        if not bookings:
+            state.result = f"""
+No tickets found for phone number: {phone}
+
+Please check if:
+- The phone number is correct
+- You have any confirmed bookings
+"""
+            return state
+        
+        # Format ticket information
+        ticket_list = []
+        for idx, booking in enumerate(bookings, 1):
+            status_emoji = "✅" if booking.get("status") == "confirmed" else "❌"
+            ticket_info = f"""
+━━━━━━━━━━━━━━━━━━━━━━
+🎫 Ticket #{idx}
+{status_emoji} Status: {booking.get('status', 'unknown').upper()}
+📋 Booking ID: {booking.get('booking_id')}
+👤 Name: {booking.get('name')}
+📞 Phone: {booking.get('phone')}
+📍 From: {booking.get('pickup_point')}
+📍 To: {booking.get('dropping_point')}
+📅 Date: {booking.get('date')}
+💺 Seats: {booking.get('seats')}
+🕐 Booked: {booking.get('booked_at', 'N/A')}
+"""
+            ticket_list.append(ticket_info)
+        
+        tickets_display = "\n".join(ticket_list)
+        state.result = f"""
+📱 Tickets for {phone}:
+
+{tickets_display}
+━━━━━━━━━━━━━━━━━━━━━━
+
+Total tickets: {len(bookings)}
+
+To cancel a ticket, please provide the booking ID.
+"""
+        return state
+    
+    except Exception as e:
+        state.result = f"Sorry, I encountered an error while retrieving your tickets: {str(e)}"
+        return state
+
 
 def cancel_ticket(state: ChatState):
-    state.result = "Ticket cancelled (placeholder)."
-    return state
+    """
+    Cancel a ticket using phone number and booking ID or date
+    """
+    thread_id = state.thread_id
+    user_message = state.user_message.lower()
+    
+    # Fetch chat history
+    chat_doc = chat_collection.find_one(
+        {"thread_id": thread_id},
+        {"chat": 1, "cancel_data": 1}
+    )
+    
+    if not chat_doc:
+        state.result = "Sorry, I couldn't find your conversation history."
+        return state
+    
+    chat_history = chat_doc.get("chat", [])
+    cancel_data = chat_doc.get("cancel_data", {})
+    
+    # Format chat history for LLM
+    formatted_history = "\n".join([
+        f"User: {msg.get('user', '')}\nBot: {msg.get('bot', '')}"
+        for msg in chat_history[-10:]
+    ])
+    
+    # Check if user is confirming cancellation
+    confirmation_keywords = ["yes", "confirm", "cancel it", "proceed", "ok", "sure", "definitely"]
+    is_confirming = any(keyword in user_message for keyword in confirmation_keywords)
+    
+    # If awaiting confirmation and user confirms
+    if cancel_data.get("awaiting_confirmation") and is_confirming:
+        booking_id = cancel_data.get("booking_id")
+        
+        # Update booking status to cancelled
+        result = db["bookings"].update_one(
+            {"booking_id": booking_id},
+            {
+                "$set": {
+                    "status": "cancelled",
+                    "cancelled_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.modified_count > 0:
+            # Clear cancel_data
+            chat_collection.update_one(
+                {"thread_id": thread_id},
+                {"$unset": {"cancel_data": ""}}
+            )
+            
+            state.result = f"""
+✅ Ticket Cancelled Successfully!
+
+Booking ID: {booking_id}
+Status: CANCELLED
+Cancelled at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
+
+Your ticket has been cancelled. If you paid online, the refund will be processed within 5-7 business days.
+"""
+            return state
+        else:
+            state.result = "Failed to cancel the ticket. Please try again or contact support."
+            return state
+    
+    # Extract cancellation information using LLM
+    extraction_prompt = f"""
+You are a ticket cancellation assistant. Extract the phone number and booking identifier from the conversation.
+
+CHAT HISTORY:
+{formatted_history}
+
+CURRENT USER MESSAGE:
+{user_message}
+
+EXISTING CANCEL DATA (if any):
+{cancel_data}
+
+Extract the following information:
+- phone: Phone number
+- booking_id: Booking ID (if provided)
+- date: Travel date (if provided as identifier, format: YYYY-MM-DD)
+
+RULES:
+1. Booking ID takes priority over date for identification
+2. Only extract clearly stated information
+3. Use existing data if not provided again
+4. Today's date is {datetime.utcnow().strftime('%Y-%m-%d')}
+
+Return ONLY a JSON object:
+{{
+    "phone": "value or null",
+    "booking_id": "value or null",
+    "date": "YYYY-MM-DD or null"
+}}
+"""
+    
+    try:
+        import json
+        extraction_response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": extraction_prompt}],
+            temperature=0
+        )
+        
+        extracted_text = extraction_response.choices[0].message.content.strip()
+        if "```json" in extracted_text:
+            extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in extracted_text:
+            extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+        
+        extracted_data = json.loads(extracted_text)
+        
+        # Merge with existing data
+        for key, value in extracted_data.items():
+            if value is not None:
+                cancel_data[key] = value
+        
+        # Check if we have enough information
+        if not cancel_data.get("phone"):
+            state.result = """
+To cancel a ticket, I need your phone number.
+
+Please provide:
+📞 Your phone number (e.g., 01712345678)
+"""
+            return state
+        
+        if not cancel_data.get("booking_id") and not cancel_data.get("date"):
+            # Show user's tickets to help them choose
+            phone = cancel_data.get("phone")
+            bookings = list(db["bookings"].find(
+                {
+                    "phone": {"$regex": phone.replace("+", "\\+"), "$options": "i"},
+                    "status": "confirmed"
+                },
+                {"_id": 0}
+            ).sort("booked_at", -1))
+            
+            if not bookings:
+                state.result = f"""
+No active tickets found for phone number: {phone}
+
+Please check if:
+- The phone number is correct
+- You have any confirmed bookings that can be cancelled
+"""
+                return state
+            
+            # Show available tickets
+            ticket_list = []
+            for idx, booking in enumerate(bookings, 1):
+                ticket_info = f"""
+🎫 Option {idx}:
+   Booking ID: {booking.get('booking_id')}
+   Date: {booking.get('date')}
+   Route: {booking.get('pickup_point')} → {booking.get('dropping_point')}
+   Seats: {booking.get('seats')}
+"""
+                ticket_list.append(ticket_info)
+            
+            tickets_display = "\n".join(ticket_list)
+            
+            # Store phone for next interaction
+            chat_collection.update_one(
+                {"thread_id": thread_id},
+                {"$set": {"cancel_data": cancel_data}}
+            )
+            
+            state.result = f"""
+📱 Active tickets for {phone}:
+
+{tickets_display}
+
+Please provide either:
+- Booking ID (e.g., abc123-def456)
+- Travel date (e.g., 2024-12-25)
+"""
+            return state
+        
+        # Find the booking
+        query = {"phone": {"$regex": cancel_data["phone"].replace("+", "\\+"), "$options": "i"}}
+        
+        if cancel_data.get("booking_id"):
+            query["booking_id"] = cancel_data["booking_id"]
+        elif cancel_data.get("date"):
+            query["date"] = cancel_data["date"]
+        
+        query["status"] = "confirmed"  # Only cancel confirmed tickets
+        
+        booking = db["bookings"].find_one(query, {"_id": 0})
+        
+        if not booking:
+            state.result = """
+❌ No matching ticket found.
+
+Possible reasons:
+- Booking ID or date is incorrect
+- Ticket is already cancelled
+- Phone number doesn't match
+
+Please verify your information and try again.
+"""
+            # Clear cancel data
+            chat_collection.update_one(
+                {"thread_id": thread_id},
+                {"$unset": {"cancel_data": ""}}
+            )
+            return state
+        
+        # Ask for confirmation
+        cancel_data["booking_id"] = booking.get("booking_id")
+        cancel_data["awaiting_confirmation"] = True
+        
+        chat_collection.update_one(
+            {"thread_id": thread_id},
+            {"$set": {"cancel_data": cancel_data}}
+        )
+        
+        state.result = f"""
+⚠️ Confirm Ticket Cancellation
+
+📋 Booking ID: {booking.get('booking_id')}
+👤 Name: {booking.get('name')}
+📞 Phone: {booking.get('phone')}
+📍 Route: {booking.get('pickup_point')} → {booking.get('dropping_point')}
+📅 Date: {booking.get('date')}
+💺 Seats: {booking.get('seats')}
+
+Are you sure you want to cancel this ticket?
+Type 'yes' to confirm or 'no' to keep the booking.
+"""
+        return state
+    
+    except Exception as e:
+        state.result = f"Sorry, I encountered an error while processing cancellation: {str(e)}"
+        return state
 
 # =====================================================
 # LANGGRAPH SETUP
