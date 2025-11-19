@@ -737,7 +737,6 @@ Type 'yes' to confirm or 'no' to keep the booking.
     except Exception as e:
         state.result = f"Sorry, I encountered an error while processing cancellation: {str(e)}"
         return state
-
 # =====================================================
 # LANGGRAPH SETUP
 # =====================================================
