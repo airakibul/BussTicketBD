@@ -228,12 +228,18 @@ Please verify your information and try again.
         state.result = f"""
 ⚠️ Confirm Ticket Cancellation
 
-📋 Booking ID: {booking.get('booking_id')}
-👤 Name: {booking.get('name')}
+📋 Booking ID: {booking.get('booking_id')} 
+👤 Name: {booking.get('name')} 
 📞 Phone: {booking.get('phone')}
-📍 Route: {booking.get('pickup_point')} → {booking.get('dropping_point')}
+🚌 Bus Provider: {booking.get('bus_provider')}
+📍 From: {booking.get('pickup_point')}
+📍 To: {booking.get('dropping_point')}
 📅 Date: {booking.get('date')}
 💺 Seats: {booking.get('seats')}
+💰 Fare per seat: ৳{booking.get('fare')}
+💵 Total Amount: ৳{booking.get('total_amount')}
+💵 payment Status: {booking.get('pyment_status')}
+🕐 Booked: {booking.get('booked_at', 'N/A')}
 
 Are you sure you want to cancel this ticket?
 Type 'yes' to confirm or 'no' to keep the booking.

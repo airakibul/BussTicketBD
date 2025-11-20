@@ -98,16 +98,19 @@ Please check if:
         for idx, booking in enumerate(bookings, 1):
             status_emoji = "✅" if booking.get("status") == "confirmed" else "❌"
             ticket_info = f"""
-━━━━━━━━━━━━━━━━━━━━━━
 🎫 Ticket #{idx}
 {status_emoji} Status: {booking.get('status', 'unknown').upper()}
 📋 Booking ID: {booking.get('booking_id')}
 👤 Name: {booking.get('name')}
 📞 Phone: {booking.get('phone')}
+🚌 Bus Provider: {booking.get('bus_provider')}
 📍 From: {booking.get('pickup_point')}
 📍 To: {booking.get('dropping_point')}
 📅 Date: {booking.get('date')}
 💺 Seats: {booking.get('seats')}
+💰 Fare per seat: ৳{booking.get('fare')}
+💵 Total Amount: ৳{booking.get('total_amount')}
+💵 payment Status: {booking.get('pyment_status')}
 🕐 Booked: {booking.get('booked_at', 'N/A')}
 """
             ticket_list.append(ticket_info)
@@ -117,7 +120,6 @@ Please check if:
 📱 Tickets for {phone}:
 
 {tickets_display}
-━━━━━━━━━━━━━━━━━━━━━━
 
 Total tickets: {len(bookings)}
 
