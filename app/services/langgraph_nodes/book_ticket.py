@@ -1,5 +1,5 @@
 from app.schemas.chat_schema import ChatState
-from app.config import client, chat_collection, db
+from app.config import client, chat_collection, db, bus_collection
 from datetime import datetime
 import uuid
 
@@ -8,14 +8,21 @@ import uuid
 
 def book_ticket(state: ChatState):
     """
-    Multi-step booking process:
-    1. Extract booking info from chat history
-    2. Check for missing fields
-    3. If complete, ask for confirmation
-    4. If confirmed, save to database
+    LLM-driven booking process - minimal if/else, maximum LLM intelligence
     """
+    import json
+    
     thread_id = state.thread_id
-    user_message = state.user_message.lower()
+    user_message = state.user_message
+    
+    # Fetch dataset from MongoDB
+    dataset = bus_collection.find_one({}, {"districts": 1, "bus_providers": 1})
+    if not dataset:
+        state.result = "Sorry, the booking system is currently unavailable."
+        return state
+    
+    districts = dataset.get("districts", [])
+    bus_providers = dataset.get("bus_providers", [])
     
     # Fetch chat history
     chat_doc = chat_collection.find_one(
@@ -30,185 +37,174 @@ def book_ticket(state: ChatState):
     chat_history = chat_doc.get("chat", [])
     existing_booking_data = chat_doc.get("booking_data", {})
     
-    # Format chat history for LLM
+    # Format chat history
     formatted_history = "\n".join([
         f"User: {msg.get('user', '')}\nBot: {msg.get('bot', '')}"
-        for msg in chat_history[-15:]  # Last 15 messages for context
+        for msg in chat_history[-15:]
     ])
     
-    # Check if user is confirming the booking
-    confirmation_keywords = ["yes", "confirm", "book", "proceed", "ok", "correct", "right", "sure", "definitely"]
-    is_confirming = any(keyword in user_message for keyword in confirmation_keywords)
+    # Format dataset for LLM
+    dataset_info = {
+        "districts": districts,
+        "bus_providers": bus_providers
+    }
     
-    # If booking data exists and user is confirming
-    if existing_booking_data.get("awaiting_confirmation") and is_confirming:
-        # Save booking to database
-        booking_id = str(uuid.uuid4())
-        booking_record = {
-            "booking_id": booking_id,
-            "user_id": existing_booking_data.get("user_id"),
-            "name": existing_booking_data.get("name"),
-            "phone": existing_booking_data.get("phone"),
-            "pickup_point": existing_booking_data.get("pickup_point"),
-            "dropping_point": existing_booking_data.get("dropping_point"),
-            "date": existing_booking_data.get("date"),
-            "seats": existing_booking_data.get("seats"),
-            "status": "confirmed",
-            "booked_at": datetime.utcnow()
-        }
-        
-        # Insert into bookings collection
-        db["bookings"].insert_one(booking_record)
-        
-        # Clear booking_data from chat collection
-        chat_collection.update_one(
-            {"thread_id": thread_id},
-            {"$unset": {"booking_data": ""}}
-        )
-        
-        state.result = f"""
-✅ Booking Confirmed!
+    # Single LLM call to handle everything
+    main_prompt = f"""
+You are an intelligent booking assistant. Handle the entire booking conversation naturally.
 
-Booking ID: {booking_id}
-Name: {booking_record['name']}
-Phone: {booking_record['phone']}
-From: {booking_record['pickup_point']}
-To: {booking_record['dropping_point']}
-Date: {booking_record['date']}
-Seats: {booking_record['seats']}
+CURRENT DATE: {datetime.utcnow().strftime('%Y-%m-%d')}
 
-Your ticket has been successfully booked. You will receive a confirmation shortly.
-"""
-        return state
-    
-    # Extract booking information using LLM
-    extraction_prompt = f"""
-You are a booking assistant. Extract booking information from the conversation.
+AVAILABLE DATA:
+{json.dumps(dataset_info, indent=2)}
 
-CHAT HISTORY:
+CONVERSATION HISTORY:
 {formatted_history}
 
-CURRENT USER MESSAGE:
-{state.user_message}
+CURRENT BOOKING DATA (if any):
+{json.dumps(existing_booking_data, indent=2) if existing_booking_data else "No data collected yet"}
 
-EXISTING DATA (if any):
-{existing_booking_data}
+USER'S CURRENT MESSAGE:
+{user_message}
 
-Extract the following information:
-- name: Passenger's full name
-- phone: Phone number (with country code if provided)
-- pickup_point: Pickup location/point
-- dropping_point: Dropping location/point
-- date: Travel date (format: YYYY-MM-DD)
-- seats: Number of seats (as integer)
+YOUR TASK:
+1. Analyze the conversation and current booking data
+2. Extract any new information from the user's message
+3. Validate that pickup_point and dropping_point are from the SAME district's dropping_points
+4. Calculate fare from the dropping_point's price when dropping_point is selected
+5. Determine the next action (ask for info, confirm, or complete booking)
+6. Generate appropriate response
+7. Ask for missing information in a natural way
 
-RULES:
-1. Only extract information that is clearly stated
-2. Use existing data if the user hasn't provided new information
-3. If a field is not mentioned, return null for that field
-4. For date, convert natural language (e.g., "tomorrow", "next Monday") to YYYY-MM-DD format
-5. Today's date is {datetime.utcnow().strftime('%Y-%m-%d')}
+BOOKING FIELDS NEEDED:
+- district_from: District name (must be from available districts)
+- district_to: District name (must be from available districts)
+- pickup_point: Pickup location (must be from district_from's dropping_points)
+- dropping_point: Dropping location (must be from district_to's dropping_points)
+- bus_provider: Bus provider must be from available for both pickup and dropping district.
+- name: Full name
+- phone: Phone number
+- date: Travel date (YYYY-MM-DD format)
+- seats: Number of seats (integer)
+- fare: Price per seat (auto-calculated from dropping_point)
 
-Return ONLY a JSON object with these exact keys:
+IMPORTANT RULES:
+- District names like "Dhaka", "Bogra" are NOT pickup/dropping points
+- pickup_point and dropping_point must be actual location names from the district's list
+- When dropping_point is selected, automatically set fare from its price
+- Only show available bus providers for the selected district
+- Ask for information in a natural, conversational way
+- When user confirms (says yes, confirm, ok, etc.) and all data is complete, proceed to booking
+
+RESPONSE FORMAT (JSON):
 {{
-    "name": "value or null",
-    "phone": "value or null",
-    "pickup_point": "value or null",
-    "dropping_point": "value or null",
-    "date": "YYYY-MM-DD or null",
-    "seats": number or null
+    "action": "ask_info" | "confirm_booking" | "complete_booking",
+    "updated_booking_data": {{
+        "district_from": "value or null",
+        "district_to": "value or null",
+        "pickup_point": "value or null",
+        "dropping_point": "value or null",
+        "bus_provider": "value or null",
+        "name": "value or null",
+        "phone": "value or null",
+        "date": "YYYY-MM-DD or null",
+        "seats": number or null,
+        "fare": number or null
+    }},
+    "response_to_user": "Your natural conversational response here"
 }}
+
+EXAMPLES OF GOOD RESPONSES:
+- For missing district_from and district_to: "Which district would you like to travel to? We cover Dhaka, Chattogram, Khulna, Rajshahi, Sylhet, Barishal, Rangpur, Mymensingh, Comilla, and Bogra."
+- For missing pickup point: "Great! In Chattogram, we have pickup points at Muradpur, Agrabad, and Kaptai. Which one would you prefer?"
+- For confirmation: "Perfect! Let me confirm your booking: [details]. Shall I proceed with this booking?"
+
+Return ONLY the JSON response, nothing else.
 """
     
     try:
-        extraction_response = client.chat.completions.create(
+        llm_response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": extraction_prompt}],
-            temperature=0
+            messages=[{"role": "user", "content": main_prompt}],
+            temperature=0.3
         )
         
-        # Parse extracted data
-        import json
-        extracted_text = extraction_response.choices[0].message.content.strip()
-        # Remove markdown code blocks if present
-        if "```json" in extracted_text:
-            extracted_text = extracted_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in extracted_text:
-            extracted_text = extracted_text.split("```")[1].split("```")[0].strip()
+        # Parse LLM response
+        response_text = llm_response.choices[0].message.content.strip()
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
         
-        booking_data = json.loads(extracted_text)
+        llm_data = json.loads(response_text)
         
-        # Merge with existing data (new data takes precedence)
-        for key, value in booking_data.items():
-            if value is not None:
-                existing_booking_data[key] = value
+        action = llm_data.get("action")
+        updated_booking_data = llm_data.get("updated_booking_data", {})
+        response_to_user = llm_data.get("response_to_user", "")
         
-        # Check for missing fields
-        required_fields = ["name", "phone", "pickup_point", "dropping_point", "date", "seats"]
-        missing_fields = [field for field in required_fields if not existing_booking_data.get(field)]
-        
-        if missing_fields:
-            # Save partial data to MongoDB
-            chat_collection.update_one(
-                {"thread_id": thread_id},
-                {"$set": {"booking_data": existing_booking_data}}
-            )
-            
-            # Ask for missing information
-            field_prompts = {
-                "name": "your full name",
-                "phone": "your phone number",
-                "pickup_point": "your pickup point",
-                "dropping_point": "your dropping point",
-                "date": "your travel date",
-                "seats": "number of seats you need"
+        # Handle based on action
+        if action == "complete_booking":
+            # Create booking record
+            booking_id = str(uuid.uuid4())
+            booking_record = {
+                "booking_id": booking_id,
+                "user_id": updated_booking_data.get("user_id"),
+                "name": updated_booking_data.get("name"),
+                "phone": updated_booking_data.get("phone"),
+                "district_from": updated_booking_data.get("district_from"),
+                "district_to": updated_booking_data.get("district_to"),
+                "pickup_point": updated_booking_data.get("pickup_point"),
+                "dropping_point": updated_booking_data.get("dropping_point"),
+                "date": updated_booking_data.get("date"),
+                "seats": updated_booking_data.get("seats"),
+                "bus_provider": updated_booking_data.get("bus_provider"),
+                "fare": updated_booking_data.get("fare"),
+                "total_amount": updated_booking_data.get("fare", 0) * updated_booking_data.get("seats", 0),
+                "pyment_status": "pending",
+                "status": "confirmed",
+                "booked_at": datetime.utcnow()
             }
             
-            collected_info = "\n".join([
-                f"✓ {field.replace('_', ' ').title()}: {existing_booking_data[field]}"
-                for field in required_fields if existing_booking_data.get(field)
-            ])
+            # Save to database
+            db["bookings"].insert_one(booking_record)
             
-            missing_info = "\n".join([
-                f"✗ {field_prompts[field].title()}"
-                for field in missing_fields
-            ])
-            
-            state.result = f"""
-I'm collecting your booking information.
-
-📋 Information collected so far:
-{collected_info if collected_info else "None yet"}
-
-❓ I still need:
-{missing_info}
-
-Please provide the missing information.
-"""
-            return state
-        
-        else:
-            # All data collected, ask for confirmation
-            existing_booking_data["awaiting_confirmation"] = True
+            # Clear booking data
             chat_collection.update_one(
                 {"thread_id": thread_id},
-                {"$set": {"booking_data": existing_booking_data}}
+                {"$unset": {"booking_data": ""}}
             )
             
             state.result = f"""
-📋 Please confirm your booking details:
+✅ Booking Confirmed!
 
-👤 Name: {existing_booking_data['name']}
-📞 Phone: {existing_booking_data['phone']}
-📍 Pickup Point: {existing_booking_data['pickup_point']}
-📍 Dropping Point: {existing_booking_data['dropping_point']}
-📅 Date: {existing_booking_data['date']}
-💺 Seats: {existing_booking_data['seats']}
+🎫 Booking ID: {booking_id}
+👤 Name: {booking_record['name']}
+📞 Phone: {booking_record['phone']}
+🚌 Bus Provider: {booking_record['bus_provider']}
+📍 District From: {booking_record['district_from']}
+📍  District To: {booking_record['district_to']}
+🔵 Pickup Point: {booking_record['pickup_point']}
+🔴 Dropping Point: {booking_record['dropping_point']}
+📅 Date: {booking_record['date']}
+💺 Seats: {booking_record['seats']}
+💰 Fare per seat: ৳{booking_record['fare']}
+💵 Total Amount: ৳{booking_record['total_amount']}
+💵 payment Status: {booking_record['pyment_status']}
 
-Is this information correct? Type 'yes' to confirm or provide corrections.
+Your ticket has been successfully booked! 🎉
 """
-            return state
+        
+        else:
+            # Save updated booking data
+            chat_collection.update_one(
+                {"thread_id": thread_id},
+                {"$set": {"booking_data": updated_booking_data}}
+            )
+            
+            state.result = response_to_user
+        
+        return state
     
     except Exception as e:
-        state.result = f"Sorry, I encountered an error while processing your booking: {str(e)}"
+        state.result = f"Sorry, I encountered an error: {str(e)}"
         return state
