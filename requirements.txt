@@ -12,3 +12,4 @@ python-dotenv
 langgraph
 langchain-openai
 langchain
+streamlit
