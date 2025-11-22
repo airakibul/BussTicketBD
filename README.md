@@ -79,7 +79,7 @@ Frontend: Streamlit chat demo runs on http://localhost:8501
 ```
 ## Langgraph
 
-![Langgraph](https://github.com/airakibul/BussTicketBD/tree/main/images/langgraph.png)
+![Langgraph](https://github.com/airakibul/BussTicketBD/blob/main/images/langgraph.png)
 
 ## Notes
 - The project expects a single aggregated document in the `busses` collection (created by the startup loader).
