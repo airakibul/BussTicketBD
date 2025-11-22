@@ -17,6 +17,7 @@ Your job:
 2. Use the latest user message to determine the intent in context.
 
 INTENT RULES (choose EXACTLY ONE):
+- general_chat       → greetings (hi, hello), gratitude (thank you), casual chat, off-topic questions
 - ask_for_info       → user asks about routes, dropping points, fare, timing, seat availability
 - provider_info      → user asks about bus company details
 - book_ticket        → user is trying to book/confirm a ticket
