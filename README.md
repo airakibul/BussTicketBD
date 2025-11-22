@@ -1,10 +1,12 @@
 
 # BussTicketBD
 
-A minimal chat-driven bus ticket assistant for Bangladesh. It uses FastAPI for the backend, Streamlit for a simple frontend demo, MongoDB for storage, and OpenAI for intent extraction and conversational responses. The project also uses langgraph to model conversation flows.
+A minimal chat-driven bus ticket assistant for Bangladesh.
+It uses FastAPI for the backend, Streamlit for a lightweight frontend demo, MongoDB for operational data storage, Pinecone for vector search and retrieval-augmented responses, and OpenAI for intent extraction and conversational generation.
+The project also uses LangGraph to model multi-step conversation flows and manage state.
 
 ## Features
-- LLM-driven intent detection and dialog nodes (search routes, book, view, cancel).
+- LLM-driven intent detection and dialog nodes (search routes and provider information, book, view, cancel).
 - MongoDB-backed data for districts, dropping points, and bookings.
 - Streamlit demo UI for chat interaction.
 - Docker Compose for easy local development with MongoDB.
@@ -17,30 +19,39 @@ A minimal chat-driven bus ticket assistant for Bangladesh. It uses FastAPI for t
 
 ## Quick setup (local)
 1. Create and activate a virtual environment:
-   - python -m venv .venv
-   - source .venv/bin/activate
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
 2. Install dependencies:
-   - pip install --upgrade pip
-   - pip install -r requirements.txt
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 3. Copy the example environment file and set secrets:
-   - cp .env .env.local && edit .env.local (or edit .env directly)
-   - Required: OPENAI_API_KEY, MONGO_URI (default in docker: mongodb://mongo:27017)
-4. Ensure data.json exists at project root (used by startup loader).
+```bash
+OPENAI_API_KEY=<your openai api key>
+PINECONE_API_KEY=<your pinecone api key>
+PINECONE_INDEX=<pinecone index>
+MONGO_URI=<mongodb://mongo:27017>
+```
 
 ## Run locally (without Docker)
 1. Start MongoDB (if you don't use docker).
 2. Start the app (FastAPI + Streamlit demo):
-   - ./start.sh
-   - Or run services separately:
-     - uvicorn app.main:app --host 0.0.0.0 --port 8000
-     - streamlit run frontend.py --server.port 8501
+```bash
+uvicorn app.main:app --reload
+streamlit run frontend.py
+```
+API: FastAPI runs on http://localhost:8000 
 
-API: FastAPI runs on http://localhost:8000
-Frontend: Streamlit chat demo runs on http://localhost:8501
+Frontend: Streamlit chat runs on http://localhost:8501
 
 ## Run with Docker Compose (recommended)
 1. Build and start services:
-   - docker compose up --build
+```bash
+docker compose up --build
+```
 2. The stack will expose:
    - FastAPI: http://localhost:8000
    - Streamlit: http://localhost:8501
@@ -54,7 +65,7 @@ Frontend: Streamlit chat demo runs on http://localhost:8501
 │   │    └── routes
 │   │          └── chat.py 
 │   ├── schemas
-│   │      └── chat_schena.py 
+│   │      └── chat_schema.py 
 │   ├── services
 │   │       ├── langgraph_nodes
 │   │       │           ├── detect_intent.py
@@ -83,7 +94,6 @@ Frontend: Streamlit chat demo runs on http://localhost:8501
 
 ## Notes
 - The project expects a single aggregated document in the `busses` collection (created by the startup loader).
-- Keep your OPENAI_API_KEY private; do not commit .env to version control.
 - For production deployment, secure secrets and consider using a managed DB and API gateway.
 
 ## Troubleshooting
@@ -92,3 +102,7 @@ Frontend: Streamlit chat demo runs on http://localhost:8501
 
 ## License
 MIT-style (adjust as needed)
+
+## Screenshot
+
+![Screenshot](https://github.com/airakibul/BussTicketBD/blob/main/images/screenshot.png)
