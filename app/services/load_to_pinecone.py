@@ -12,7 +12,7 @@ INDEX_NAME = os.getenv("PINECONE_INDEX")
 client = OpenAI(api_key=OPENAI_API_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# -------- Create index if missing ----------
+# -------- Create index if missing ----------#
 if INDEX_NAME not in pc.list_indexes().names():
     pc.create_index(
         name=INDEX_NAME,

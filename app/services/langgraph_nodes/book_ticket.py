@@ -90,6 +90,8 @@ BOOKING FIELDS NEEDED:
 
 IMPORTANT RULES:
 - District names like "Dhaka", "Bogra" are NOT pickup/dropping points
+- For pickup points don't show the price
+- Always show price for dropping point
 - pickup_point and dropping_point must be actual location names from the district's list
 - When dropping_point is selected, automatically set fare from its price
 - Only show available bus providers for the selected district
