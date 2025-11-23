@@ -2,11 +2,16 @@
 # BussTicketBD
 
 A minimal chat-driven bus ticket assistant for Bangladesh.
-It uses FastAPI for the backend, Streamlit for a lightweight frontend demo, MongoDB for operational data storage, Pinecone for vector search and retrieval-augmented responses, and OpenAI for intent extraction and conversational generation.
+It uses **FastAPI** for the backend, **Streamlit** for a lightweight frontend demo, **MongoDB** for operational data storage, **Pinecone** for **vector search** and **retrieval-augmented** responses, and **OpenAI** for intent extraction and conversational generation.
 The project also uses LangGraph to model multi-step conversation flows and manage state.
 
 ## Features
-- LLM-driven intent detection and dialog nodes (search routes and provider information, book, view, cancel).
+- LLM-driven intent detection and dialog nodes.
+   - **search routes**
+   - **provider information**
+   - **booking ticktets**
+   - **view tickets**
+   - **cancel tickets**
 - MongoDB-backed data for districts, dropping points, and bookings.
 - Streamlit demo UI for chat interaction.
 - Docker Compose for easy local development with MongoDB.
@@ -93,7 +98,7 @@ docker compose up --build
 ![Langgraph](https://github.com/airakibul/BussTicketBD/blob/main/images/langgraph.png)
 
 ## Notes
-- The project expects a single aggregated document in the `busses` collection (created by the startup loader).
+- The project expects a single aggregated document in the `busses` collection and `buss provider information` in the vector database. (created by the startup loader).
 - For production deployment, secure secrets and consider using a managed DB and API gateway.
 
 ## Troubleshooting
