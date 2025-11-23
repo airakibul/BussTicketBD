@@ -101,7 +101,7 @@ docker compose up --build
 - Check logs for the `app` container or run uvicorn in the terminal to see startup errors.
 
 ## License
-MIT-style (adjust as needed)
+This project is licensed under the MIT License – see the [LICENSE](./LICENSE) file for details.
 
 ## Screenshot
 
