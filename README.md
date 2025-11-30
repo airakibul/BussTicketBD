@@ -3,7 +3,7 @@
 
 A minimal chat-driven bus ticket assistant for Bangladesh.
 It uses **FastAPI** for the backend, **Streamlit** for a lightweight frontend demo, **MongoDB** for operational data storage, **Pinecone** for **vector search** and **retrieval-augmented** responses, and **OpenAI** for intent extraction and conversational generation.
-The project also uses LangGraph to model multi-step conversation flows and manage state.
+The project also uses **LangGraph** to model multi-step conversation flows and manage state.
 
 ## Features
 - LLM-driven intent detection and dialog nodes.
